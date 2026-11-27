@@ -1,0 +1,8 @@
+/*
+!/ssleye/
+!/README.md
+!/LICENSE
+!/.gitignore
+!/pyproject.toml
+__pycache__/
+*.pyc
