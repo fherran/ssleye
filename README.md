@@ -1,4 +1,9 @@
-# An Inside View To Your SSL Model
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/ssleye-banner-dark.png">
+    <img src="assets/ssleye-banner-light.png" width="640" alt="SSLEye - An Inside View To Your SSL Model">
+  </picture>
+</p>
 
 SSLEye lets you watch a self-supervised encoder learn, live or on replay. Add a few calls to your own
 training script (SimCLR, BYOL, DINO v1/v2/v3, MAE, I-JEPA, V-JEPA, ...). Snapshots are written to

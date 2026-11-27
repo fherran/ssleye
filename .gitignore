@@ -4,5 +4,6 @@
 !/LICENSE
 !/.gitignore
 !/pyproject.toml
+!/assets/
 __pycache__/
 *.pyc
