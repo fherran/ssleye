@@ -7,7 +7,7 @@
 
 SSLEye lets you watch a self-supervised encoder learn, live or on replay. Add a few calls to your own
 training script (SimCLR, BYOL, DINO v1/v2/v3, MAE, I-JEPA, V-JEPA, ...). Snapshots are written to
-`ssleye_runs/`, and a local dashboard reads them. No labels are needed.
+`ssleye_runs/`, and a local dashboard reads them.
 
 ## Install
 
