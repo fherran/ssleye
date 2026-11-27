@@ -1,5 +1,6 @@
 """Run logger, writes to ssleye_runs/<project>/<run>/."""
 import atexit
+import shutil
 import base64
 import json
 import math
@@ -101,13 +102,25 @@ def _b64(arr):
 class Run:
     def __init__(self, project="default", name=None, dir="ssleye_runs", config=None,
                  snapshot_every=500, stream_every=25, stream_n=6, alerts=None, model="auto",
-                 stages=None, batch_info=None, sample_every_min=30, sample_n=24):
+                 stages=None, batch_info=None, sample_every_min=30, sample_n=24, distributed=False):
         self.model, self.profile = P.get(model)
+        self.rank, self.world = 0, 1
+        if distributed:
+            import torch.distributed as dist
+            if dist.is_available() and dist.is_initialized():
+                self.rank, self.world = dist.get_rank(), dist.get_world_size()
+        self._dist = self.world > 1
+        # other ranks make the same calls (FSDP needs every rank in the forward) but write to a temp dir
+        self._follower = self.rank != 0
         name = name or time.strftime("run-%Y%m%d-%H%M%S")
-        base = Path(dir) / project
-        path = base / name
-        if path.exists():
-            path = base / f"{name}-{time.strftime('%Y%m%d-%H%M%S')}"
+        if self._follower:
+            import tempfile
+            path = Path(tempfile.mkdtemp(prefix=f"ssleye-rank{self.rank}-"))
+        else:
+            base = Path(dir) / project
+            path = base / name
+            if path.exists():
+                path = base / f"{name}-{time.strftime('%Y%m%d-%H%M%S')}"
         (path / "snapshots").mkdir(parents=True)
         (path / "stream").mkdir()
         self.path = path
@@ -125,6 +138,7 @@ class Run:
             "stages": _jsonable(stages or [{"name": "Pre-training", "note": "single stage"}]), "stage": 0,
             "batch_info": _jsonable(batch_info or {}), "pipeline": None,
             "sample_every_min": float(sample_every_min), "sample_n": int(sample_n),
+            "world_size": self.world,
         }
         self.sample_n = int(sample_n)
         self._sample_every = float(sample_every_min) * 60.0
@@ -163,7 +177,21 @@ class Run:
         self._dsize = None
         self._finished = False
         atexit.register(self._atexit)
-        print(f"[ssleye] logging to {self.path.resolve()}", flush=True)
+        self._say(f"[ssleye] logging to {self.path.resolve()}", flush=True)
+
+    def _say(self, msg, **kw):
+        if not self._follower:
+            print(msg, flush=True)
+
+    def _agree(self, flag):
+        """Rank 0 decides, so every rank enters the same forward passes."""
+        if not self._dist:
+            return flag
+        import torch.distributed as dist
+        dev = torch.device("cuda", torch.cuda.current_device()) if dist.get_backend() == "nccl" else "cpu"
+        t = torch.tensor([int(flag)], device=dev)
+        dist.broadcast(t, 0)
+        return bool(t.item())
 
     def _write_meta(self):
         _atomic_json(self.path / "meta.json", self.meta)
@@ -180,7 +208,7 @@ class Run:
         self._last_alert[kind] = step
         self._append("alerts", {"step": int(step), "t": time.time(), "level": level,
                                 "type": kind, "msg": msg})
-        print(f"[ssleye] {level.upper()} step {step}: {msg}", flush=True)
+        self._say(f"[ssleye] {level.upper()} step {step}: {msg}", flush=True)
 
     def set_probe(self, images, labels=None, class_names=None, n_display=16, n_matrix=50, n_views=128):
         """Fixed images checked at every snapshot. labels are optional."""
@@ -232,7 +260,7 @@ class Run:
         try:
             cfg = json.loads(p.read_text(encoding="utf-8"))
         except Exception as e:
-            print(f"[ssleye] could not read settings.json: {e}", flush=True)
+            self._say(f"[ssleye] could not read settings.json: {e}", flush=True)
             return
         probe = self._probe
         n = len(probe["x"])
@@ -258,11 +286,13 @@ class Run:
         pm["display"] = {"file": fname, "size": self._dsize}
         pm["display_versions"].append({"version": self._disp_ver, "file": fname, "idx": idx, "from_step": int(step)})
         _atomic_json(self.path / "probe.json", pm)
-        print(f"[ssleye] settings applied at step {step}: {len(idx)} images for attention/similarity maps", flush=True)
+        self._say(f"[ssleye] settings applied at step {step}: {len(idx)} images for attention/similarity maps", flush=True)
 
     def watch(self, encoder, preprocess=None, augment=None, patch_layer=None, attn_module=None,
               batch_size=256, total_params=None):
         """augment is used for LiDAR and align/uniform. total_params = everything being trained."""
+        if isinstance(encoder, torch.nn.parallel.DistributedDataParallel):
+            encoder = encoder.module
         self._insp = Inspector(encoder, patch_layer, attn_module)
         try:
             self.meta["model_info"] = X.model_info(encoder, total_params)
@@ -354,7 +384,7 @@ class Run:
         if res:
             res.update(step=int(step), t=time.time())
             self._append("downstream", res)
-            print(f"[ssleye] downstream {d.name} @ {step}: kNN {res['knn']:.3f} linear {res['linear']:.3f} few-shot {res['fewshot']:.3f} ({res['eval_s']}s)", flush=True)
+            self._say(f"[ssleye] downstream {d.name} @ {step}: kNN {res['knn']:.3f} linear {res['linear']:.3f} few-shot {res['fewshot']:.3f} ({res['eval_s']}s)", flush=True)
 
     def _cka(self, step, feats):
         cur = [f.detach().float().cpu() for f in feats]
@@ -422,6 +452,8 @@ class Run:
                         f"Loss barely moved over the last {2 * w} steps ({a:.4f} to {b:.4f})")
 
     def _stream(self, step, batch):
+        if self._follower:
+            return
         if isinstance(batch, dict):
             names, tensors = list(batch.keys()), list(batch.values())
         else:
@@ -483,7 +515,7 @@ class Run:
             self.meta["inspector"] = info
             self.meta["warnings"] = P.check(self.profile, info)
             for w in self.meta["warnings"]:
-                print(f"[ssleye] WARNING: {w}", flush=True)
+                self._say(f"[ssleye] WARNING: {w}", flush=True)
             self._write_meta()
 
         labels = probe["labels"]
@@ -598,7 +630,7 @@ class Run:
             fails = self.meta.setdefault("metric_failures", {})
             fails[name] = fails.get(name, 0) + 1
             if fails[name] == 1:
-                print(f"[ssleye] WARNING: metric '{name}' failed and was skipped ({type(e).__name__}: {str(e)[:160]})", flush=True)
+                self._say(f"[ssleye] WARNING: metric '{name}' failed and was skipped ({type(e).__name__}: {str(e)[:160]})", flush=True)
             self._write_meta()
             return None
 
@@ -667,11 +699,11 @@ class Run:
             self.meta.setdefault("stage_starts", {})[str(index)] = int(step) if step is not None else self._last_logged
             self._write_meta()
             name = (self.meta["stages"][index]["name"] if index < len(self.meta["stages"]) else index)
-            print(f"[ssleye] stage {index + 1}: {name}", flush=True)
+            self._say(f"[ssleye] stage {index + 1}: {name}", flush=True)
 
     def sample_due(self):
         """True every sample_every_min minutes."""
-        return time.time() >= self._next_sample
+        return self._agree(time.time() >= self._next_sample)
 
     def log_samples(self, step, samples):
         from .samples import save_samples
@@ -679,7 +711,7 @@ class Run:
         try:
             save_samples(self, step, samples)
         except Exception as e:  # noqa: BLE001
-            print(f"[ssleye] WARNING: batch samples skipped ({type(e).__name__}: {str(e)[:160]})", flush=True)
+            self._say(f"[ssleye] WARNING: batch samples skipped ({type(e).__name__}: {str(e)[:160]})", flush=True)
 
     def finish(self, step=None, snapshot=True):
         if self._finished:
@@ -698,6 +730,8 @@ class Run:
         self._write_meta()
         for f in self._files.values():
             f.close()
+        if self._follower:
+            shutil.rmtree(self.path, ignore_errors=True)
 
     def _atexit(self):
         if not self._finished:

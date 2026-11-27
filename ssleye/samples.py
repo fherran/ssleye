@@ -103,7 +103,7 @@ def save_samples(run, step, samples):
                 maps["tokens"] = {"dim": int(t.shape[-1]), "grid": int(math.isqrt(t.shape[1])),
                                   "data": _b64(np.clip(np.round(t.cpu().numpy() * 127), -127, 127).astype(np.int8))}
         except Exception as e:  # noqa: BLE001
-            print(f"[ssleye] WARNING: sample attention maps skipped ({type(e).__name__}: {str(e)[:120]})", flush=True)
+            run._say(f"[ssleye] WARNING: sample attention maps skipped ({type(e).__name__}: {str(e)[:120]})", flush=True)
 
     index = {"step": int(step), "t": time.time(), "clock": time.strftime("%H:%M"), "stage": run.meta.get("stage"),
              "samples": out, "maps": maps}
@@ -111,4 +111,4 @@ def save_samples(run, step, samples):
         json.dump(index, f, separators=(",", ":"))
     run._append("samples", {"step": int(step), "t": index["t"], "clock": index["clock"], "file": f"{rel}/index.json",
                             "n": len(out), "stage": run.meta.get("stage")})
-    print(f"[ssleye] saved {len(out)} batch samples at step {step} ({stamp})", flush=True)
+    run._say(f"[ssleye] saved {len(out)} batch samples at step {step} ({stamp})", flush=True)

@@ -53,7 +53,7 @@ def do_train(cfg, model, resume=False):
     iteration = start_iter
 
     run = ssleye.init(project="imagenet", name="dinov3-vitl16", model="dinov3",       # ssleye
-                      snapshot_every=1000)                                            # ssleye
+                      snapshot_every=1000, distributed=True)                          # ssleye
     run.set_probe(probe_images)            # (N,3,H,W) in [0,1], a fixed set of images  # ssleye
     run.watch(model.teacher.backbone,                                                # ssleye
               preprocess=v2.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)), # ssleye
@@ -84,7 +84,7 @@ def do_train(cfg, model, resume=False):
 - `model.teacher.backbone` is the EMA teacher, the network DINOv3 evaluates. Use `model.student.backbone` to watch the student instead.
 - `model="dinov3"` turns on the DINOv3 checks (4 register tokens, RoPE, Gram loss). The loss terms in `metrics_dict` show up as their own charts.
 - Probe images are any fixed set of images, e.g. 64 from your validation set, resized to the training resolution.
-- Single GPU for now. On a multi-GPU (FSDP) run SSLEye is not supported yet.
+- `distributed=True` makes it safe on multi-GPU runs: DINOv3 shards the model with FSDP, so every GPU must take part in the snapshot forward pass. Run the same SSLEye calls on every GPU; only rank 0 writes files.
 
 ## What you get
 
@@ -103,6 +103,25 @@ def do_train(cfg, model, resume=False):
 - **Stages and batch info:** `ssleye.init(..., stages=[...], batch_info={...})` and `run.set_stage(i, step)`.
 - **Model size:** `run.watch(..., total_params=n)` shows the ViT size and parameter count.
 - **Alert thresholds:** `ssleye.init(..., alerts={"loss_spike": 3.0})`; the defaults are `DEFAULT_ALERTS` in `ssleye/run.py`.
+- **Multi-GPU (DDP / FSDP):** `ssleye.init(..., distributed=True)` and make the same calls on every rank. Rank 0 writes the run; the other ranks only join the forward passes.
+
+## Contributing
+
+Issues and pull requests are welcome. Useful areas:
+
+- support for more SSL methods (add a profile in `ssleye/profiles.py`)
+- trying it on real multi-GPU / multi-node runs (so far tested with 2 processes on CPU)
+- new label-free metrics or dashboard views
+
+To work on it locally:
+
+```bash
+git clone https://github.com/fherran/ssleye.git
+cd ssleye
+pip install -e ".[full]"
+```
+
+For bigger changes, please open an issue first so we can discuss the approach.
 
 ## License
 
